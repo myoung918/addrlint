@@ -270,3 +270,103 @@ fn main() -> ExitCode {
         ExitCode::SUCCESS
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rules(findings: &[Finding]) -> Vec<&'static str> {
+        findings.iter().map(|f| f.rule).collect()
+    }
+
+    #[test]
+    fn is_zip_accepts_five_digit() {
+        assert!(is_zip("62704"));
+    }
+
+    #[test]
+    fn is_zip_accepts_zip_plus_four() {
+        assert!(is_zip("62704-1234"));
+    }
+
+    #[test]
+    fn is_zip_accepts_trailing_punctuation() {
+        assert!(is_zip("62704,"));
+        assert!(is_zip("62704."));
+    }
+
+    #[test]
+    fn is_zip_rejects_wrong_length() {
+        assert!(!is_zip("6270"));
+        assert!(!is_zip("627045"));
+    }
+
+    #[test]
+    fn is_zip_rejects_non_digits() {
+        assert!(!is_zip("6270A"));
+        assert!(!is_zip("62704-12A4"));
+    }
+
+    #[test]
+    fn is_zip_rejects_misplaced_dash() {
+        assert!(!is_zip("627-041234"));
+    }
+
+    #[test]
+    fn lint_clean_block_has_no_findings() {
+        let text = "Maria Alvarez\n482 Cedarwood Lane\nSpringfield IL 62704\n";
+        assert!(lint(text).is_empty());
+    }
+
+    #[test]
+    fn lint_flags_long_line() {
+        let text = "Name\n482 Cedarwood Lane Apartment 12B, Building C, Second Floor\nSpringfield IL 62704\n";
+        let findings = lint(text);
+        assert!(rules(&findings).contains(&"line-too-long"));
+    }
+
+    #[test]
+    fn lint_flags_trailing_whitespace() {
+        let text = "Name\n5 Maple Ct   \nAustin TX 78701\n";
+        let findings = lint(text);
+        assert!(rules(&findings).contains(&"trailing-whitespace"));
+    }
+
+    #[test]
+    fn lint_flags_incomplete_block() {
+        let text = "James Whitfield\n";
+        let findings = lint(text);
+        assert_eq!(rules(&findings), vec!["incomplete-block"]);
+    }
+
+    #[test]
+    fn lint_flags_missing_state_and_zip() {
+        let text = "James Whitfield\n19 Birch St\nPortland\n";
+        let findings = lint(text);
+        assert!(rules(&findings).contains(&"missing-state"));
+        assert!(rules(&findings).contains(&"missing-zip"));
+    }
+
+    #[test]
+    fn lint_flags_lowercase_state() {
+        let text = "Tomoko Sato\n77 Harbor View Road\nPortland or 97201\n";
+        let findings = lint(text);
+        assert_eq!(rules(&findings), vec!["state-not-uppercase"]);
+    }
+
+    #[test]
+    fn lint_reports_findings_in_line_order() {
+        let text = "Name\n5 Maple Ct   \nAustin TX 78701\n\nOther\n19 Birch St\n";
+        let findings = lint(text);
+        let line_numbers: Vec<usize> = findings.iter().map(|f| f.line).collect();
+        let mut sorted = line_numbers.clone();
+        sorted.sort();
+        assert_eq!(line_numbers, sorted);
+    }
+
+    #[test]
+    fn lint_ignores_blank_lines_between_blocks() {
+        let text = "Maria Alvarez\n482 Cedarwood Lane\nSpringfield IL 62704\n\nJames Whitfield\n19 Birch St\nPortland OR 97201\n";
+        assert!(lint(text).is_empty());
+    }
+}
