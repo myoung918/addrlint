@@ -29,7 +29,14 @@ Portland OR 97201
 ## Usage
 
 ```
-addrlint <file> [--json]
+addrlint [<file>] [--json]
+```
+
+Omit `<file>` or pass `-` to read the address block from stdin instead of a
+file, so it can sit in a pipeline:
+
+```
+$ cat examples/addresses.txt | addrlint
 ```
 
 Given `examples/addresses.txt`:

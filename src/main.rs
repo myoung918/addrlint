@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::{self, Read};
 use std::process::ExitCode;
 
 // USPS guidance for printed address blocks is to keep each line at or under
@@ -219,7 +220,8 @@ fn print_human(path: &str, findings: &[Finding]) {
 }
 
 fn print_usage() {
-    eprintln!("usage: addrlint <file> [--json]");
+    eprintln!("usage: addrlint [<file>] [--json]");
+    eprintln!("       omit <file> or pass - to read from stdin");
 }
 
 fn main() -> ExitCode {
@@ -238,30 +240,31 @@ fn main() -> ExitCode {
         }
     }
 
-    let path = match path {
-        Some(p) => p,
-        None => {
-            eprintln!("addrlint: no input file given");
-            print_usage();
-            return ExitCode::from(2);
+    let (label, text) = match path.as_deref() {
+        None | Some("-") => {
+            let mut buf = String::new();
+            if let Err(e) = io::stdin().read_to_string(&mut buf) {
+                eprintln!("addrlint: cannot read stdin: {}", e);
+                return ExitCode::from(2);
+            }
+            ("<stdin>".to_string(), buf)
         }
-    };
-
-    let text = match fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("addrlint: cannot read {}: {}", path, e);
-            return ExitCode::from(2);
-        }
+        Some(p) => match fs::read_to_string(p) {
+            Ok(t) => (p.to_string(), t),
+            Err(e) => {
+                eprintln!("addrlint: cannot read {}: {}", p, e);
+                return ExitCode::from(2);
+            }
+        },
     };
 
     let findings = lint(&text);
     let has_errors = findings.iter().any(|f| f.severity == Severity::Error);
 
     if json_output {
-        print_json(&path, &findings);
+        print_json(&label, &findings);
     } else {
-        print_human(&path, &findings);
+        print_human(&label, &findings);
     }
 
     if has_errors {
