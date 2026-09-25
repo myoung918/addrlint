@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::env;
 use std::fs;
 use std::io::{self, Read};
@@ -13,6 +14,77 @@ const STATE_ABBREVS: &[&str] = &[
     "NM", "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT",
     "VA", "WA", "WV", "WI", "WY", "DC", "PR", "VI", "GU", "AS", "MP",
 ];
+
+const ALL_RULES: &[&str] = &[
+    "line-too-long",
+    "trailing-whitespace",
+    "incomplete-block",
+    "missing-state",
+    "state-not-uppercase",
+    "missing-zip",
+];
+
+// Which rules are active for a run. Findings are generated unconditionally
+// and filtered against this set at the end, which keeps the individual
+// checks free of enablement plumbing.
+struct RuleSet {
+    enabled: HashSet<&'static str>,
+}
+
+impl RuleSet {
+    fn all() -> Self {
+        RuleSet {
+            enabled: ALL_RULES.iter().copied().collect(),
+        }
+    }
+
+    fn is_enabled(&self, rule: &str) -> bool {
+        self.enabled.contains(rule)
+    }
+}
+
+// Parses a --rules spec such as "missing-state,missing-zip" (only run these)
+// or "-trailing-whitespace,-line-too-long" (run everything except these).
+// A bare name switches to an allow-list; a "-"-prefixed name removes from
+// whatever set is active, so the two forms can be mixed if needed.
+fn parse_rules(spec: &str) -> Result<RuleSet, String> {
+    let mut positive: Vec<&'static str> = Vec::new();
+    let mut negative: Vec<&'static str> = Vec::new();
+
+    for raw in spec.split(',') {
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let (name, disable) = match raw.strip_prefix('-') {
+            Some(rest) => (rest, true),
+            None => (raw, false),
+        };
+        let canonical = ALL_RULES.iter().find(|r| **r == name).copied().ok_or_else(|| {
+            format!(
+                "unknown rule '{}'; valid rules are: {}",
+                name,
+                ALL_RULES.join(", ")
+            )
+        })?;
+        if disable {
+            negative.push(canonical);
+        } else {
+            positive.push(canonical);
+        }
+    }
+
+    let mut enabled: HashSet<&'static str> = if positive.is_empty() {
+        ALL_RULES.iter().copied().collect()
+    } else {
+        positive.into_iter().collect()
+    };
+    for rule in negative {
+        enabled.remove(rule);
+    }
+
+    Ok(RuleSet { enabled })
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Severity {
@@ -36,7 +108,7 @@ struct Finding {
     message: String,
 }
 
-fn lint(text: &str) -> Vec<Finding> {
+fn lint(text: &str, rules: &RuleSet) -> Vec<Finding> {
     let mut findings = Vec::new();
     let lines: Vec<&str> = text.lines().collect();
 
@@ -62,6 +134,7 @@ fn lint(text: &str) -> Vec<Finding> {
         check_block(block_start, &lines[block_start - 1..], &mut findings);
     }
 
+    findings.retain(|f| rules.is_enabled(f.rule));
     findings.sort_by_key(|f| f.line);
     findings
 }
@@ -220,16 +293,25 @@ fn print_human(path: &str, findings: &[Finding]) {
 }
 
 fn print_usage() {
-    eprintln!("usage: addrlint [<file>] [--json]");
+    eprintln!("usage: addrlint [<file>] [--json] [--rules=<spec>]");
     eprintln!("       omit <file> or pass - to read from stdin");
+    eprintln!();
+    eprintln!("       --rules=missing-state,missing-zip   run only these rules");
+    eprintln!("       --rules=-line-too-long,-trailing-whitespace   run all but these");
+    eprintln!("       available rules: {}", ALL_RULES.join(", "));
 }
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     let mut json_output = false;
     let mut path: Option<String> = None;
+    let mut rules_spec: Option<String> = None;
 
     for arg in &args[1..] {
+        if let Some(spec) = arg.strip_prefix("--rules=") {
+            rules_spec = Some(spec.to_string());
+            continue;
+        }
         match arg.as_str() {
             "--json" => json_output = true,
             "-h" | "--help" => {
@@ -239,6 +321,17 @@ fn main() -> ExitCode {
             other => path = Some(other.to_string()),
         }
     }
+
+    let rule_set = match rules_spec {
+        Some(spec) => match parse_rules(&spec) {
+            Ok(rs) => rs,
+            Err(e) => {
+                eprintln!("addrlint: {}", e);
+                return ExitCode::from(2);
+            }
+        },
+        None => RuleSet::all(),
+    };
 
     let (label, text) = match path.as_deref() {
         None | Some("-") => {
@@ -258,7 +351,7 @@ fn main() -> ExitCode {
         },
     };
 
-    let findings = lint(&text);
+    let findings = lint(&text, &rule_set);
     let has_errors = findings.iter().any(|f| f.severity == Severity::Error);
 
     if json_output {
@@ -318,34 +411,34 @@ mod tests {
     #[test]
     fn lint_clean_block_has_no_findings() {
         let text = "Maria Alvarez\n482 Cedarwood Lane\nSpringfield IL 62704\n";
-        assert!(lint(text).is_empty());
+        assert!(lint(text, &RuleSet::all()).is_empty());
     }
 
     #[test]
     fn lint_flags_long_line() {
         let text = "Name\n482 Cedarwood Lane Apartment 12B, Building C, Second Floor\nSpringfield IL 62704\n";
-        let findings = lint(text);
+        let findings = lint(text, &RuleSet::all());
         assert!(rules(&findings).contains(&"line-too-long"));
     }
 
     #[test]
     fn lint_flags_trailing_whitespace() {
         let text = "Name\n5 Maple Ct   \nAustin TX 78701\n";
-        let findings = lint(text);
+        let findings = lint(text, &RuleSet::all());
         assert!(rules(&findings).contains(&"trailing-whitespace"));
     }
 
     #[test]
     fn lint_flags_incomplete_block() {
         let text = "James Whitfield\n";
-        let findings = lint(text);
+        let findings = lint(text, &RuleSet::all());
         assert_eq!(rules(&findings), vec!["incomplete-block"]);
     }
 
     #[test]
     fn lint_flags_missing_state_and_zip() {
         let text = "James Whitfield\n19 Birch St\nPortland\n";
-        let findings = lint(text);
+        let findings = lint(text, &RuleSet::all());
         assert!(rules(&findings).contains(&"missing-state"));
         assert!(rules(&findings).contains(&"missing-zip"));
     }
@@ -353,14 +446,14 @@ mod tests {
     #[test]
     fn lint_flags_lowercase_state() {
         let text = "Tomoko Sato\n77 Harbor View Road\nPortland or 97201\n";
-        let findings = lint(text);
+        let findings = lint(text, &RuleSet::all());
         assert_eq!(rules(&findings), vec!["state-not-uppercase"]);
     }
 
     #[test]
     fn lint_reports_findings_in_line_order() {
         let text = "Name\n5 Maple Ct   \nAustin TX 78701\n\nOther\n19 Birch St\n";
-        let findings = lint(text);
+        let findings = lint(text, &RuleSet::all());
         let line_numbers: Vec<usize> = findings.iter().map(|f| f.line).collect();
         let mut sorted = line_numbers.clone();
         sorted.sort();
@@ -370,6 +463,58 @@ mod tests {
     #[test]
     fn lint_ignores_blank_lines_between_blocks() {
         let text = "Maria Alvarez\n482 Cedarwood Lane\nSpringfield IL 62704\n\nJames Whitfield\n19 Birch St\nPortland OR 97201\n";
-        assert!(lint(text).is_empty());
+        assert!(lint(text, &RuleSet::all()).is_empty());
+    }
+
+    #[test]
+    fn lint_respects_disabled_rule() {
+        let text = "Name\n5 Maple Ct   \nAustin TX 78701\n";
+        let rule_set = parse_rules("-trailing-whitespace").unwrap();
+        let findings = lint(text, &rule_set);
+        assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn lint_respects_allow_listed_rules() {
+        let text = "Tomoko Sato\n77 Harbor View Road Extra Long Text To Go Over Forty Characters\nPortland or 97201\n";
+        let rule_set = parse_rules("state-not-uppercase").unwrap();
+        let findings = lint(text, &rule_set);
+        assert_eq!(rules(&findings), vec!["state-not-uppercase"]);
+    }
+
+    #[test]
+    fn parse_rules_defaults_to_everything_enabled() {
+        let rule_set = RuleSet::all();
+        for rule in ALL_RULES {
+            assert!(rule_set.is_enabled(rule));
+        }
+    }
+
+    #[test]
+    fn parse_rules_disables_listed_rules() {
+        let rule_set = parse_rules("-missing-zip,-missing-state").unwrap();
+        assert!(!rule_set.is_enabled("missing-zip"));
+        assert!(!rule_set.is_enabled("missing-state"));
+        assert!(rule_set.is_enabled("line-too-long"));
+    }
+
+    #[test]
+    fn parse_rules_allow_lists_named_rules() {
+        let rule_set = parse_rules("missing-zip,missing-state").unwrap();
+        assert!(rule_set.is_enabled("missing-zip"));
+        assert!(rule_set.is_enabled("missing-state"));
+        assert!(!rule_set.is_enabled("line-too-long"));
+    }
+
+    #[test]
+    fn parse_rules_rejects_unknown_rule() {
+        assert!(parse_rules("not-a-real-rule").is_err());
+    }
+
+    #[test]
+    fn parse_rules_ignores_blank_entries_and_whitespace() {
+        let rule_set = parse_rules(" -missing-zip, , -missing-state ").unwrap();
+        assert!(!rule_set.is_enabled("missing-zip"));
+        assert!(!rule_set.is_enabled("missing-state"));
     }
 }

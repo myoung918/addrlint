@@ -29,7 +29,7 @@ Portland OR 97201
 ## Usage
 
 ```
-addrlint [<file>] [--json]
+addrlint [<file>] [--json] [--rules=<spec>]
 ```
 
 Omit `<file>` or pass `-` to read the address block from stdin instead of a
@@ -81,6 +81,25 @@ $ addrlint examples/addresses.txt --json
 
 The exit code is nonzero if any finding is an `error`, so it can gate a
 build without parsing output at all.
+
+## Selecting rules
+
+By default every check runs. `--rules` takes a comma-separated list to
+narrow that down:
+
+```
+$ addrlint --rules=-trailing-whitespace,-line-too-long examples/addresses.txt
+```
+
+runs everything except the two named rules, while
+
+```
+$ addrlint --rules=missing-state,missing-zip examples/addresses.txt
+```
+
+runs only those two. The two forms can be mixed; a bare name switches to an
+allow-list, and a `-`-prefixed name removes from whatever set is currently
+active. An unrecognized rule name is a usage error, not a silent no-op.
 
 ## Current checks
 
